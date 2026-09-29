@@ -12,9 +12,10 @@ on:
         required: false
         type: boolean
         default: false
-# 赋予读写权限
+
 permissions:
   contents: write
+
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: true
@@ -34,16 +35,19 @@ jobs:
         include:
           - platform: iOS
             scheme: HakoClient
-            destination: "generic/platform=iOS Simulator"
+            destination: "generic/platform=iOS"
             artifact: HakoClient-iOS
+            type: ipa
           - platform: tvOS
             scheme: HakoTV
-            destination: "generic/platform=tvOS Simulator"
+            destination: "generic/platform=tvOS"
             artifact: HakoClient-tvOS
+            type: ipa
           - platform: macOS
             scheme: HakoMac
             destination: "generic/platform=macOS"
             artifact: HakoClient-macOS
+            type: dmg
 
     steps:
       - name: Checkout
@@ -73,15 +77,19 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+          cache: 'pip'
 
-      - name: Cache dependencies
+      - name: Cache Xcode DerivedData
         uses: actions/cache@v4
         with:
-          path: |
-            .build/dependencies
-            .build/bin
-            Hako.xcframework
-          key: hako-sdk-${{ hashFiles('Dependencies.lock.json') }}-${{ runner.os }}
+          path: ${{ runner.temp }}/DerivedData
+          # key 建议绑定 platform、Lock 文件以及源码文件哈希
+          key: xcode-cache-${{ matrix.platform }}-${{ hashFiles('apple/**', 'Dependencies.lock.json') }}
+          # 源码变动时，降级使用上一次的构建缓存做增量编译
+          restore-keys: |
+            xcode-cache-${{ matrix.platform }}-
+
+      
 
       - name: Bootstrap (Kernel + Adapter + SDK)
         run: |
@@ -97,12 +105,14 @@ jobs:
           source .build/python-env/bin/activate
           python3 scripts/configure.py
 
-      - name: Build ${{ matrix.platform }}
-        id: build
+      - name: Build and Archive ${{ matrix.platform }}
+        id: archive
         run: |
           set -euo pipefail
+          ARCHIVE_DIR="${{ runner.temp }}/archives"
           DERIVED_DATA="${{ runner.temp }}/DerivedData"
-          mkdir -p "$DERIVED_DATA"
+          mkdir -p "$ARCHIVE_DIR" "$DERIVED_DATA"
+          ARCHIVE_PATH="$ARCHIVE_DIR/${{ matrix.artifact }}.xcarchive"
 
           xcodebuild \
             -project apple/HakoClient/HakoClient.xcodeproj \
@@ -110,49 +120,68 @@ jobs:
             -configuration Release \
             -destination "${{ matrix.destination }}" \
             -derivedDataPath "$DERIVED_DATA" \
+            archive \
+            -archivePath "$ARCHIVE_PATH" \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
-            build
+            CODE_SIGN_ENTITLEMENTS="" \
+            PROVISIONING_PROFILE_SPECIFIER=""
 
-          echo "derived_data=$DERIVED_DATA" >> "$GITHUB_OUTPUT"
-
-      - name: Package artifact
+      - name: Package artifact (IPA / DMG)
         run: |
           set -euo pipefail
           VERSION="${{ inputs.version }}"
           OUT_DIR="${{ runner.temp }}/artifacts"
           mkdir -p "$OUT_DIR"
-          DERIVED="${{ steps.build.outputs.derived_data }}"
+          ARCHIVE_PATH="${{ steps.archive.outputs.archive_path }}"
 
-          case "${{ matrix.platform }}" in
-            iOS)
-              # Simulator App
-              APP_PATH=$(find "$DERIVED" -name "*.app" -path "*/Release-iphonesimulator/*" | head -1)
-              if [ -z "$APP_PATH" ]; then
-                APP_PATH=$(find "$DERIVED" -name "*.app" | head -1)
-              fi
-              echo "Packaging iOS app: $APP_PATH"
-              ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" \
-                "$OUT_DIR/${{ matrix.artifact }}-${VERSION}-simulator.zip"
+          APP_DIR="$ARCHIVE_PATH/Products/Applications"
+          APP_PATH=$(find "$APP_DIR" -maxdepth 1 -name "*.app" | head -1)
+
+          if [ -z "$APP_PATH" ]; then
+            echo "::error::未在 $APP_DIR 找到 .app 文件"
+            exit 1
+          fi
+
+          echo "Found app at: $APP_PATH"
+
+          case "${{ matrix.type }}" in
+            ipa)
+              echo "Packaging as IPA..."
+              PAYLOAD_DIR="${{ runner.temp }}/Payload"
+              rm -rf "$PAYLOAD_DIR"
+              mkdir -p "$PAYLOAD_DIR"
+              
+              # 规范：IPA 内部根目录必须为 Payload
+              cp -R "$APP_PATH" "$PAYLOAD_DIR/"
+              
+              IPA_NAME="${{ matrix.artifact }}-${VERSION}.ipa"
+              (cd "${{ runner.temp }}" && zip -qr "$OUT_DIR/$IPA_NAME" Payload)
+              rm -rf "$PAYLOAD_DIR"
+              echo "Generated: $OUT_DIR/$IPA_NAME"
               ;;
-            tvOS)
-              APP_PATH=$(find "$DERIVED" -name "*.app" -path "*/Release-appletvsimulator/*" | head -1)
-              if [ -z "$APP_PATH" ]; then
-                APP_PATH=$(find "$DERIVED" -name "*.app" | head -1)
-              fi
-              echo "Packaging tvOS app: $APP_PATH"
-              ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" \
-                "$OUT_DIR/${{ matrix.artifact }}-${VERSION}-simulator.zip"
-              ;;
-            macOS)
-              APP_PATH=$(find "$DERIVED" -name "*.app" -path "*/Release/*" | head -1)
-              if [ -z "$APP_PATH" ]; then
-                APP_PATH=$(find "$DERIVED" -name "*.app" | head -1)
-              fi
-              echo "Packaging macOS app: $APP_PATH"
-              ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" \
-                "$OUT_DIR/${{ matrix.artifact }}-${VERSION}.zip"
+              
+            dmg)
+              echo "Packaging as DMG..."
+              DMG_TEMP_DIR="${{ runner.temp }}/dmg_root"
+              rm -rf "$DMG_TEMP_DIR"
+              mkdir -p "$DMG_TEMP_DIR"
+              
+              # 复制应用并生成 /Applications 快捷方式软链接
+              cp -R "$APP_PATH" "$DMG_TEMP_DIR/"
+              ln -s /Applications "$DMG_TEMP_DIR/Applications"
+              
+              DMG_NAME="${{ matrix.artifact }}-${VERSION}.dmg"
+              hdiutil create \
+                -volname "${{ matrix.scheme }}" \
+                -srcfolder "$DMG_TEMP_DIR" \
+                -ov \
+                -format UDZO \
+                "$OUT_DIR/$DMG_NAME"
+                
+              rm -rf "$DMG_TEMP_DIR"
+              echo "Generated: $OUT_DIR/$DMG_NAME"
               ;;
           esac
 
@@ -197,15 +226,15 @@ jobs:
             **Unsigned builds** (for compilation verification / sideload testing only).
 
             ### Assets
-            - **iOS** – Simulator build (`HakoClient-iOS-*-simulator.zip`)
-            - **tvOS** – Simulator build (`HakoClient-tvOS-*-simulator.zip`)
-            - **macOS** – App bundle (`HakoClient-macOS-*.zip`)
+            - **iOS** – Unsigned IPA (`HakoClient-iOS-*.ipa`)
+            - **tvOS** – Unsigned IPA (`HakoClient-tvOS-*.ipa`)
+            - **macOS** – Disk Image (`HakoClient-macOS-*.dmg`)
 
             ### Notes
             - Built from commit `${{ github.sha }}`
             - No code signing applied (`CODE_SIGNING_ALLOWED=NO`)
-            - iOS / tvOS are **Simulator** builds only
-            - For device install you need your own signing setup
+            - **iOS / tvOS**: Install via TrollStore, AltStore, Sideloadly or re-sign manually.
+            - **macOS**: Drag to Applications folder. May require right-click -> Open or `xattr -cr` due to Gatekeeper.
 
             ---
             Built with GitHub Actions · [Workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
