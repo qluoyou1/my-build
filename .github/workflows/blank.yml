@@ -1,0 +1,218 @@
+name: Hako Client Release Build (Unsigned)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g. 1.0.0 或 1.0.0-beta.1)'
+        required: true
+        type: string
+      prerelease:
+        description: '标记为 Pre-release'
+        required: false
+        type: boolean
+        default: false
+# 赋予读写权限
+permissions:
+  contents: write
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CODE_SIGNING_ALLOWED: "NO"
+  CODE_SIGN_IDENTITY: ""
+  CODE_SIGNING_REQUIRED: "NO"
+
+jobs:
+  build:
+    name: Build ${{ matrix.platform }}
+    runs-on: macos-15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: iOS
+            scheme: HakoClient
+            destination: "generic/platform=iOS Simulator"
+            artifact: HakoClient-iOS
+          - platform: tvOS
+            scheme: HakoTV
+            destination: "generic/platform=tvOS Simulator"
+            artifact: HakoClient-tvOS
+          - platform: macOS
+            scheme: HakoMac
+            destination: "generic/platform=macOS"
+            artifact: HakoClient-macOS
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          repository: TokenPLS/Hako-Client
+          fetch-depth: 0
+
+      - name: Select Xcode
+        run: |
+          sudo xcode-select -s /Applications/Xcode.app
+          xcodebuild -version
+          xcodebuild -showsdks
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache: true
+
+      - name: Install tools
+        run: |
+          brew install xcodegen
+          xcodegen --version
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            .build/dependencies
+            .build/bin
+            Hako.xcframework
+          key: hako-sdk-${{ hashFiles('Dependencies.lock.json') }}-${{ runner.os }}
+
+      - name: Bootstrap (Kernel + Adapter + SDK)
+        run: |
+          python3 -m venv .build/python-env
+          source .build/python-env/bin/activate
+          python3 -m pip install --upgrade pip PyYAML
+          python3 scripts/bootstrap.py
+        env:
+          GOTOOLCHAIN: auto
+
+      - name: Configure project
+        run: |
+          source .build/python-env/bin/activate
+          python3 scripts/configure.py
+
+      - name: Build ${{ matrix.platform }}
+        id: build
+        run: |
+          set -euo pipefail
+          DERIVED_DATA="${{ runner.temp }}/DerivedData"
+          mkdir -p "$DERIVED_DATA"
+
+          xcodebuild \
+            -project apple/HakoClient/HakoClient.xcodeproj \
+            -scheme "${{ matrix.scheme }}" \
+            -configuration Release \
+            -destination "${{ matrix.destination }}" \
+            -derivedDataPath "$DERIVED_DATA" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            build
+
+          echo "derived_data=$DERIVED_DATA" >> "$GITHUB_OUTPUT"
+
+      - name: Package artifact
+        run: |
+          set -euo pipefail
+          VERSION="${{ inputs.version }}"
+          OUT_DIR="${{ runner.temp }}/artifacts"
+          mkdir -p "$OUT_DIR"
+          DERIVED="${{ steps.build.outputs.derived_data }}"
+
+          case "${{ matrix.platform }}" in
+            iOS)
+              # Simulator App
+              APP_PATH=$(find "$DERIVED" -name "*.app" -path "*/Release-iphonesimulator/*" | head -1)
+              if [ -z "$APP_PATH" ]; then
+                APP_PATH=$(find "$DERIVED" -name "*.app" | head -1)
+              fi
+              echo "Packaging iOS app: $APP_PATH"
+              ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" \
+                "$OUT_DIR/${{ matrix.artifact }}-${VERSION}-simulator.zip"
+              ;;
+            tvOS)
+              APP_PATH=$(find "$DERIVED" -name "*.app" -path "*/Release-appletvsimulator/*" | head -1)
+              if [ -z "$APP_PATH" ]; then
+                APP_PATH=$(find "$DERIVED" -name "*.app" | head -1)
+              fi
+              echo "Packaging tvOS app: $APP_PATH"
+              ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" \
+                "$OUT_DIR/${{ matrix.artifact }}-${VERSION}-simulator.zip"
+              ;;
+            macOS)
+              APP_PATH=$(find "$DERIVED" -name "*.app" -path "*/Release/*" | head -1)
+              if [ -z "$APP_PATH" ]; then
+                APP_PATH=$(find "$DERIVED" -name "*.app" | head -1)
+              fi
+              echo "Packaging macOS app: $APP_PATH"
+              ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" \
+                "$OUT_DIR/${{ matrix.artifact }}-${VERSION}.zip"
+              ;;
+          esac
+
+          ls -lh "$OUT_DIR"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}-${{ inputs.version }}
+          path: ${{ runner.temp }}/artifacts/*
+          retention-days: 7
+          if-no-files-found: error
+
+  release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: List assets
+        run: |
+          echo "=== Release assets ==="
+          find release-assets -type f -ls
+          ls -lhR release-assets
+
+      - name: Create Release & Upload
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: Hako-Client-v${{ inputs.version }}
+          name: Hako Client v${{ inputs.version }}
+          body: |
+            ## Hako Client ${{ inputs.version }}
+
+            **Unsigned builds** (for compilation verification / sideload testing only).
+
+            ### Assets
+            - **iOS** – Simulator build (`HakoClient-iOS-*-simulator.zip`)
+            - **tvOS** – Simulator build (`HakoClient-tvOS-*-simulator.zip`)
+            - **macOS** – App bundle (`HakoClient-macOS-*.zip`)
+
+            ### Notes
+            - Built from commit `${{ github.sha }}`
+            - No code signing applied (`CODE_SIGNING_ALLOWED=NO`)
+            - iOS / tvOS are **Simulator** builds only
+            - For device install you need your own signing setup
+
+            ---
+            Built with GitHub Actions · [Workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+          draft: false
+          prerelease: ${{ inputs.prerelease }}
+          files: |
+            release-assets/**
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
