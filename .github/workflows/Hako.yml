@@ -67,6 +67,7 @@ jobs:
         with:
           go-version: '1.26'
           cache: true
+          cache-dependency-path: '**/go.sum'
 
       - name: Install tools
         run: |
@@ -77,18 +78,16 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+          cache: 'pip'
 
-      - name: Cache Xcode DerivedData
+      - name: Cache SDK dependencies
         uses: actions/cache@v4
         with:
-          path: ${{ runner.temp }}/DerivedData
-          # key 建议绑定 platform、Lock 文件以及源码文件哈希
-          key: xcode-cache-${{ matrix.platform }}-${{ hashFiles('apple/**', 'Dependencies.lock.json') }}
-          # 源码变动时，降级使用上一次的构建缓存做增量编译
-          restore-keys: |
-            xcode-cache-${{ matrix.platform }}-
-
-      
+          path: |
+            .build/dependencies
+            .build/bin
+            Hako.xcframework
+          key: hako-sdk-${{ hashFiles('Dependencies.lock.json') }}-${{ runner.os }}
 
       - name: Bootstrap (Kernel + Adapter + SDK)
         run: |
@@ -109,8 +108,7 @@ jobs:
         run: |
           set -euo pipefail
           ARCHIVE_DIR="${{ runner.temp }}/archives"
-          DERIVED_DATA="${{ runner.temp }}/DerivedData"
-          mkdir -p "$ARCHIVE_DIR" "$DERIVED_DATA"
+          mkdir -p "$ARCHIVE_DIR"
           ARCHIVE_PATH="$ARCHIVE_DIR/${{ matrix.artifact }}.xcarchive"
 
           xcodebuild \
@@ -118,14 +116,16 @@ jobs:
             -scheme "${{ matrix.scheme }}" \
             -configuration Release \
             -destination "${{ matrix.destination }}" \
-            -derivedDataPath "$DERIVED_DATA" \
             archive \
             -archivePath "$ARCHIVE_PATH" \
+            SKIP_INSTALL=NO \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_ENTITLEMENTS="" \
             PROVISIONING_PROFILE_SPECIFIER=""
+
+          echo "archive_path=$ARCHIVE_PATH" >> "$GITHUB_OUTPUT"
 
       - name: Package artifact (IPA / DMG)
         run: |
@@ -133,13 +133,32 @@ jobs:
           VERSION="${{ inputs.version }}"
           OUT_DIR="${{ runner.temp }}/artifacts"
           mkdir -p "$OUT_DIR"
-          ARCHIVE_PATH="${{ steps.archive.outputs.archive_path }}"
 
-          APP_DIR="$ARCHIVE_PATH/Products/Applications"
-          APP_PATH=$(find "$APP_DIR" -maxdepth 1 -name "*.app" | head -1)
+          ARCHIVE_PATH="${{ steps.archive.outputs.archive_path }}"
+          if [ -z "$ARCHIVE_PATH" ] || [ ! -d "$ARCHIVE_PATH" ]; then
+            ARCHIVE_PATH="${{ runner.temp }}/archives/${{ matrix.artifact }}.xcarchive"
+          fi
+
+          if [ ! -d "$ARCHIVE_PATH" ]; then
+            echo "::error::Archive 目录不存在: $ARCHIVE_PATH"
+            exit 1
+          fi
+
+          echo "Archive path: $ARCHIVE_PATH"
+          echo "=== Archive 目录诊断 ==="
+          find "$ARCHIVE_PATH" -maxdepth 3 -ls || true
+
+          APP_PATH=""
+          if [ -d "$ARCHIVE_PATH/Products/Applications" ]; then
+            APP_PATH=$(find "$ARCHIVE_PATH/Products/Applications" -maxdepth 2 -name "*.app" | head -n 1)
+          fi
+
+          if [ -z "$APP_PATH" ] && [ -d "$ARCHIVE_PATH/Products" ]; then
+            APP_PATH=$(find "$ARCHIVE_PATH/Products" -name "*.app" | head -n 1)
+          fi
 
           if [ -z "$APP_PATH" ]; then
-            echo "::error::未在 $APP_DIR 找到 .app 文件"
+            echo "::error::未在 $ARCHIVE_PATH/Products 下找到 .app 文件！"
             exit 1
           fi
 
@@ -151,26 +170,23 @@ jobs:
               PAYLOAD_DIR="${{ runner.temp }}/Payload"
               rm -rf "$PAYLOAD_DIR"
               mkdir -p "$PAYLOAD_DIR"
-              
-              # 规范：IPA 内部根目录必须为 Payload
               cp -R "$APP_PATH" "$PAYLOAD_DIR/"
-              
+
               IPA_NAME="${{ matrix.artifact }}-${VERSION}.ipa"
               (cd "${{ runner.temp }}" && zip -qr "$OUT_DIR/$IPA_NAME" Payload)
               rm -rf "$PAYLOAD_DIR"
-              echo "Generated: $OUT_DIR/$IPA_NAME"
+              echo "Generated IPA: $OUT_DIR/$IPA_NAME"
               ;;
-              
+
             dmg)
               echo "Packaging as DMG..."
               DMG_TEMP_DIR="${{ runner.temp }}/dmg_root"
               rm -rf "$DMG_TEMP_DIR"
               mkdir -p "$DMG_TEMP_DIR"
-              
-              # 复制应用并生成 /Applications 快捷方式软链接
+
               cp -R "$APP_PATH" "$DMG_TEMP_DIR/"
               ln -s /Applications "$DMG_TEMP_DIR/Applications"
-              
+
               DMG_NAME="${{ matrix.artifact }}-${VERSION}.dmg"
               hdiutil create \
                 -volname "${{ matrix.scheme }}" \
@@ -178,9 +194,9 @@ jobs:
                 -ov \
                 -format UDZO \
                 "$OUT_DIR/$DMG_NAME"
-                
+
               rm -rf "$DMG_TEMP_DIR"
-              echo "Generated: $OUT_DIR/$DMG_NAME"
+              echo "Generated DMG: $OUT_DIR/$DMG_NAME"
               ;;
           esac
 
@@ -192,7 +208,6 @@ jobs:
           name: ${{ matrix.artifact }}-${{ inputs.version }}
           path: ${{ runner.temp }}/artifacts/*
           retention-days: 7
-          if-no-files-found: error
 
   release:
     name: Create GitHub Release
@@ -208,39 +223,24 @@ jobs:
           path: release-assets
           merge-multiple: true
 
-      - name: List assets
-        run: |
-          echo "=== Release assets ==="
-          find release-assets -type f -ls
-          ls -lhR release-assets
-
-      - name: Create Release & Upload
+      - name: Create Release & Upload Assets
         uses: softprops/action-gh-release@v2
         with:
           tag_name: Hako-Client-v${{ inputs.version }}
           name: Hako Client v${{ inputs.version }}
           body: |
-            ## Hako Client ${{ inputs.version }}
-
-            **Unsigned builds** (for compilation verification / sideload testing only).
+            ## Hako Client ${{ inputs.version }} (Unsigned Release)
 
             ### Assets
-            - **iOS** – Unsigned IPA (`HakoClient-iOS-*.ipa`)
-            - **tvOS** – Unsigned IPA (`HakoClient-tvOS-*.ipa`)
-            - **macOS** – Disk Image (`HakoClient-macOS-*.dmg`)
+            - **iOS**: `HakoClient-iOS-*.ipa` (Install via TrollStore / AltStore / Sideloadly)
+            - **tvOS**: `HakoClient-tvOS-*.ipa` (Install via Sideloadly / Apple TV Sideload)
+            - **macOS**: `HakoClient-macOS-*.dmg` (Drag to Applications)
 
-            ### Notes
-            - Built from commit `${{ github.sha }}`
-            - No code signing applied (`CODE_SIGNING_ALLOWED=NO`)
-            - **iOS / tvOS**: Install via TrollStore, AltStore, Sideloadly or re-sign manually.
-            - **macOS**: Drag to Applications folder. May require right-click -> Open or `xattr -cr` due to Gatekeeper.
-
-            ---
-            Built with GitHub Actions · [Workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+            ### Build Info
+            - Commit: `${{ github.sha }}`
+            - Code Signing: Disabled (`CODE_SIGNING_ALLOWED=NO`)
           draft: false
           prerelease: ${{ inputs.prerelease }}
-          files: |
-            release-assets/**
-          fail_on_unmatched_files: true
+          files: release-assets/**
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
