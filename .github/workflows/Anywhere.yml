@@ -63,7 +63,6 @@ jobs:
           sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
           xcodebuild -version
           xcodebuild -showsdks
-          xcodebuild -list -project Anywhere.xcodeproj
 
       - name: Cache SwiftPM Packages
         uses: actions/cache@v4
