@@ -61,7 +61,7 @@ jobs:
           xcodebuild -version
           xcodebuild -showsdks
 
-      - name: Workaround 1 Restore Rules.db and Remove 404 AnywhereRules Dependency
+      - name: Workaround 1  Restore Rules.db and Redirect AnywhereRules to Local Package
         run: |
           set -euo pipefail
           echo "=== 1. 从 commit 70d0b556 恢复 Rules.db ==="
@@ -73,58 +73,57 @@ jobs:
             exit 1
           fi
 
-          echo "=== 2. 切回 RoutingRulesDatabase.swift 的 Bundle.main 逻辑 ==="
-          python3 -c "
-          import glob
+          echo "=== 2. 创建本地合法的 Dummy AnywhereRules Package ==="
+          LOCAL_PKG_DIR="${{ runner.temp }}/AnywhereRules"
+          rm -rf "$LOCAL_PKG_DIR"
+          mkdir -p "$LOCAL_PKG_DIR/Sources/AnywhereRules"
 
-          files = glob.glob('**/RoutingRulesDatabase.swift', recursive=True)
-          for path in files:
-              with open(path, 'r', encoding='utf-8') as f:
-                  content = f.read()
+          # 声明 package，完全满足原工程的平台与产品定义
+          cat << 'EOF' > "$LOCAL_PKG_DIR/Package.swift"
+          // swift-tools-version: 5.9
+          import PackageDescription
 
-              # 移除 import AnywhereRules
-              content = '\n'.join([line for line in content.splitlines() if 'import AnywhereRules' not in line])
+          let package = Package(
+              name: "AnywhereRules",
+              platforms: [.iOS(.v15), .macOS(.v12), .tvOS(.v15), .watchOS(.v8)],
+              products: [
+                  .library(name: "AnywhereRules", targets: ["AnywhereRules"]),
+              ],
+              targets: [
+                  .target(name: "AnywhereRules", path: "Sources/AnywhereRules")
+              ]
+          )
+          EOF
 
-              # 替换 URL 加载为应用内 Bundle.main 资源
-              content = content.replace('AnywhereRules.databaseURL', 'Bundle.main.url(forResource: \"Rules\", withExtension: \"db\")')
+          # 提供与原依赖一致的 AnywhereRules.databaseURL 接口，让主工程代码无需修改
+          cat << 'EOF' > "$LOCAL_PKG_DIR/Sources/AnywhereRules/AnywhereRules.swift"
+          import Foundation
 
-              with open(path, 'w', encoding='utf-8') as f:
-                  f.write(content)
-              print(f'Patched: {path}')
-          "
+          public struct AnywhereRules {
+              public static var databaseURL: URL? {
+                  return Bundle.main.url(forResource: "Rules", withExtension: "db")
+              }
+          }
+          EOF
 
-          echo "=== 3. 彻底从 pbxproj 和 Package.resolved 中移除 AnywhereRules ==="
-          python3 -c "
-          import re, glob, json
+          # 初始化为 Git 仓库并打上 Package.resolved 所需的版本 tag 和 revision
+          git -C "$LOCAL_PKG_DIR" init -b main
+          git -C "$LOCAL_PKG_DIR" config user.name "CI"
+          git -C "$LOCAL_PKG_DIR" config user.email "ci@local"
+          git -C "$LOCAL_PKG_DIR" add .
+          git -C "$LOCAL_PKG_DIR" commit -m "Dummy AnywhereRules for offline build"
+          
+          # 针对 Package.resolved 中锁定的版本分别打上 tag
+          git -C "$LOCAL_PKG_DIR" tag 1.1.0
+          git -C "$LOCAL_PKG_DIR" tag 1.0.0
 
-          for pbx in glob.glob('**/*.pbxproj', recursive=True):
-              with open(pbx, 'r', encoding='utf-8') as f:
-                  content = f.read()
+          echo "=== 3. 通过 Git insteadOf 全局重定向 404 URL 到本地路径 ==="
+          # 当 Xcode/SwiftPM 尝试拉取远程 404 仓库时，git 会自动透明地重定向到本地目录
+          git config --global url."file://${LOCAL_PKG_DIR}/".insteadOf "https://github.com/hiDandelion/AnywhereRules.git"
+          git config --global url."file://${LOCAL_PKG_DIR}/".insteadOf "https://github.com/hiDandelion/AnywhereRules"
 
-              content = re.sub(r'[A-F0-9]{24}\s*/\*\s*XCRemoteSwiftPackageReference \"AnywhereRules\"\s*\*/\s*=\s*\{[^}]+\};', '', content)
-              content = re.sub(r'[A-F0-9]{24}\s*/\*\s*AnywhereRules\s*\*/\s*=\s*\{[^}]+\};', '', content)
-              content = re.sub(r'[A-F0-9]{24}\s*/\*\s*XCRemoteSwiftPackageReference \"AnywhereRules\"\s*\*/,?', '', content)
-              content = re.sub(r'[A-F0-9]{24}\s*/\*\s*AnywhereRules in Frameworks\s*\*/,?', '', content)
-
-              with open(pbx, 'w', encoding='utf-8') as f:
-                  f.write(content)
-              print(f'Stripped AnywhereRules from: {pbx}')
-
-          for res in glob.glob('**/Package.resolved', recursive=True):
-              with open(res, 'r', encoding='utf-8') as f:
-                  content = f.read()
-              if 'AnywhereRules' in content:
-                  try:
-                      data = json.loads(content)
-                      if 'pins' in data:
-                          data['pins'] = [p for p in data['pins'] if 'AnywhereRules' not in p.get('identity', '') and 'AnywhereRules' not in p.get('location', '')]
-                          with open(res, 'w', encoding='utf-8') as f:
-                              json.dump(data, f, indent=2)
-                          print(f'Cleaned Package.resolved pin: {res}')
-                  except Exception as e:
-                      print(f'Error reading {res}: {e}')
-          "
-
+          echo "AnywhereRules 依赖已成功重定向到本地！"
+          
       - name: Workaround 2  Fix Watch App Missing Color (Issue #100)
         if: matrix.platform == 'watchOS'
         run: |
