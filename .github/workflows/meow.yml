@@ -91,11 +91,11 @@ jobs:
           echo "=== 编译 Rust Target: ${{ matrix.rust_target }} ==="
           
           if [ -f "./build.sh" ]; then
-            chmod +x ./build.sh
+            chmod +x ./build-rust.sh
             ./build.sh
           elif [ -f "./scripts/build.sh" ]; then
-            chmod +x ./scripts/build.sh
-            ./scripts/build.sh
+            chmod +x ./scripts/build-rust.sh
+            ./scripts/build-rust.sh
           else
             cargo build --release --target ${{ matrix.rust_target }}
           fi
