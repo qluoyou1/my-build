@@ -1,0 +1,223 @@
+name: VXproxy Release iOS (Unsigned)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (留空则自动读取 pubspec.yaml)'
+        required: false
+        type: string
+        default: ''
+      prerelease:
+        description: '标记为 Pre-release'
+        required: false
+        type: boolean
+        default: false
+  repository_dispatch:
+    types: [trigger-vx-release]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-ios-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CODE_SIGNING_ALLOWED: "NO"
+  CODE_SIGN_IDENTITY: ""
+  CODE_SIGNING_REQUIRED: "NO"
+
+jobs:
+  release-ios:
+    runs-on: macos-latest  # 如果你有自定义 runner，可替换为对应的标签
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          repository: 5VNetwork/VX
+          fetch-depth: 0
+
+      - name: Checkout dependencies
+        # env:
+        #   GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+        run: |
+          cd ..
+          git clone https://github.com/5VNetwork/tm-plugin.git tm-plugin
+          git clone https://github.com/5VNetwork/flutter_common.git flutter_common
+
+      - name: Create placeholder files
+        run: |
+          touch ../tm-plugin/tm_windows/assets/x.dll
+          touch ../tm-plugin/tm_windows/assets/wintun.dll
+          touch ../tm-plugin/tm_windows/assets/vx_service.zip
+          touch ../tm-plugin/tm_linux/assets/x.so
+          touch ../tm-plugin/tm_linux/assets/x
+          mkdir -p assets/google_fonts
+
+      - name: Download geo
+        run: |
+          mkdir -p assets/geo
+          curl -OL "https://github.com/5VNetwork/process-geo/releases/latest/download/simplified_geoip.dat" 
+          mv simplified_geoip.dat assets/geo/simplified_geoip.dat
+          curl -OL "https://github.com/5VNetwork/process-geo/releases/latest/download/simplified_geosite.dat" 
+          mv simplified_geosite.dat assets/geo/simplified_geosite.dat
+
+      - name: Download library from release
+        # env:
+        #   GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+        run: |
+          gh release download build \
+            -R 5VNetwork/vx-core \
+            -p "tm-ios.xcframework.zip"
+          unzip -q tm-ios.xcframework.zip 
+          mv tm.xcframework ios/tm.xcframework
+          ls -la ios/tm.xcframework
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Flutter version
+        run: flutter --version
+
+      - name: Cache pub dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.pub-cache
+            ${{ github.workspace }}/.dart_tool
+          key: pub-${{ runner.os }}-${{ hashFiles('**/pubspec.lock') }}
+          restore-keys: |
+            pub-${{ runner.os }}-
+
+      - name: Cache CocoaPods
+        uses: actions/cache@v4
+        with:
+          path: ios/Pods
+          key: pods-${{ runner.os }}-${{ hashFiles('**/Podfile.lock') }}
+          restore-keys: |
+            pods-${{ runner.os }}-
+
+      - name: Get Flutter dependencies
+        run: |
+          flutter config --no-enable-swift-package-manager
+          flutter pub get
+
+      - name: Install FlutterFire
+        run: dart pub global activate flutterfire_cli
+
+      - name: Install Pods
+        run: |
+          cd ios && pod install
+
+      - name: Force Manual Signing in Xcode Project
+        run: |
+          set -euo pipefail
+          echo "=== 强制关闭 Xcode 工程中的 Automatic Signing 和 Profile 要求 ==="
+          python3 -c "
+          import re, glob
+
+          for pbx in glob.glob('ios/**/*.pbxproj', recursive=True):
+              with open(pbx, 'r', encoding='utf-8') as f:
+                  content = f.read()
+
+              content = re.sub(r'CODE_SIGN_STYLE\s*=\s*Automatic;', 'CODE_SIGN_STYLE = Manual;', content)
+              content = re.sub(r'PROVISIONING_PROFILE_SPECIFIER\s*=\s*[^;]+;', 'PROVISIONING_PROFILE_SPECIFIER = \"\";', content)
+              content = re.sub(r'\"?PROVISIONING_PROFILE\"?\s*=\s*[^;]+;', 'PROVISIONING_PROFILE = \"\";', content)
+              content = re.sub(r'CODE_SIGN_IDENTITY\s*=\s*[^;]+;', 'CODE_SIGN_IDENTITY = \"\";', content)
+              content = re.sub(r'DEVELOPMENT_TEAM\s*=\s*[^;]+;', 'DEVELOPMENT_TEAM = \"\";', content)
+
+              with open(pbx, 'w', encoding='utf-8') as f:
+                  f.write(content)
+              print(f'Patched signing config in: {pbx}')
+          "
+
+      - name: Extract Version
+        id: get_version
+        run: |
+          set -euo pipefail
+          BUILD_NUMBER=$(grep '^version:' pubspec.yaml | sed 's/version: .*+\(.*\)/\1/')
+          VERSION_NAME=$(grep '^version:' pubspec.yaml | sed 's/version: \(.*\)+.*/\1/')
+          
+          FINAL_VERSION="${{ inputs.version }}"
+          if [ -z "$FINAL_VERSION" ]; then
+            FINAL_VERSION="$VERSION_NAME"
+          fi
+
+          echo "version=$FINAL_VERSION" >> "$GITHUB_OUTPUT"
+          echo "build_number=$BUILD_NUMBER" >> "$GITHUB_OUTPUT"
+          echo "Target Version: $FINAL_VERSION (Build$BUILD_NUMBER)"
+
+      - name: Build Unsigned iOS App
+        # env:
+        #   LOG_KEY: ${{ secrets.LOG_KEY }}
+        run: |
+          set -euo pipefail
+          echo "=== 开始无签名构建 iOS App ==="
+          flutter build ios \
+            --flavor production \
+            --dart-define=LOG_KEY="${LOG_KEY:-}" \
+            --release \
+            --no-codesign \
+            --split-debug-info=symbols/darwin
+
+      - name: Package Unsigned IPA
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.get_version.outputs.version }}"
+          OUT_DIR="${{ runner.temp }}/artifacts"
+          mkdir -p "$OUT_DIR"
+
+          # 查找 Flutter 编译生成的 .app 目录
+          APP_PATH=$(find build/ios/iphoneos -maxdepth 2 -name "*.app" | head -n 1)
+          if [ -z "$APP_PATH" ]; then
+            echo "::error::未在 build/ios/iphoneos 找到 .app 文件！"
+            find build/ios -maxdepth 3 -ls || true
+            exit 1
+          fi
+
+          echo "Found compiled app at: $APP_PATH"
+          echo "Packaging into Payload structure..."
+
+          PAYLOAD_DIR="${{ runner.temp }}/Payload"
+          rm -rf "$PAYLOAD_DIR"
+          mkdir -p "$PAYLOAD_DIR"
+
+          cp -R "$APP_PATH" "$PAYLOAD_DIR/"
+
+          IPA_NAME="Vproxy-iOS-${VERSION}.ipa"
+          (cd "${{ runner.temp }}" && zip -qr "$OUT_DIR/$IPA_NAME" Payload)
+          rm -rf "$PAYLOAD_DIR"
+
+          echo "Generated IPA: $OUT_DIR/$IPA_NAME"
+          ls -lh "$OUT_DIR"
+
+      - name: Upload IPA Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Vproxy-iOS-${{ steps.get_version.outputs.version }}
+          path: ${{ runner.temp }}/artifacts/*
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: Vproxy-v${{ steps.get_version.outputs.version }}
+          name: Vproxy v${{ steps.get_version.outputs.version }}
+          body: |
+            ## Vproxy v${{ steps.get_version.outputs.version }} (Unsigned iOS Build)
+
+            - Commit: `${{ github.sha }}`
+            - Flutter Release (`--no-codesign`)
+            - 适配 TrollStore、AltStore、Sideloadly 或通过个人证书自签名安装。
+          draft: false
+          prerelease: ${{ inputs.prerelease }}
+          files: |
+            ${{ runner.temp }}/artifacts/*.ipa
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
