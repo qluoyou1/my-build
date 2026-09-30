@@ -64,8 +64,8 @@ jobs:
           mv simplified_geosite.dat assets/geo/simplified_geosite.dat
 
       - name: Download library from release
-        # env:
-        #   GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release download build \
             -R 5VNetwork/vx-core \
