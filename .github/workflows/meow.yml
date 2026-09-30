@@ -125,11 +125,13 @@ jobs:
 
           echo "Archiving ${{ matrix.platform }} with scheme:${{ matrix.scheme }}..."
           xcodebuild \
+            -project meow-ios.xcodeproj \
             -scheme "${{ matrix.scheme }}" \
             -configuration Release \
             -destination "${{ matrix.destination }}" \
             archive \
             -archivePath "$ARCHIVE_PATH" \
+            SKIP_INSTALL=NO \
             CODE_SIGN_STYLE=Manual \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGN_IDENTITY="" \
