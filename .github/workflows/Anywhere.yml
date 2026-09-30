@@ -57,7 +57,19 @@ jobs:
           repository: NodePassProject/Anywhere
           fetch-depth: 0
           submodules: recursive
+      - name: Workaround Restore local Rules
+        run: |
+          set -euo pipefail
 
+          # 1. 恢复文件
+          git restore --source=70d0b5561614f13310eb95afbfd928ad39f98509 -- Shared/DataStore/Rules.db
+
+          # 2. 替换 import AnywhereRules
+          find Shared -name "*.swift" -exec sed -i '' '/import AnywhereRules/d' {} +
+
+          # 3. 替换加载路径（根据实际调用的变量名微调匹配表达式）
+          find Shared -name "*.swift" -exec sed -i '' 's/AnywhereRules\.databaseURL/Bundle.main.url(forResource: "Rules", withExtension: "db")!/g' {} +
+          
       - name: Select Xcode
         run: |
           sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
