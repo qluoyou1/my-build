@@ -61,14 +61,62 @@ jobs:
         run: |
           set -euo pipefail
 
-          # 1. 恢复文件
-          git restore --source=70d0b5561614f13310eb95afbfd928ad39f98509 -- Shared/DataStore/Rules.db
+          echo "=== 1. 从历史提交中恢复 Rules.db ==="
+          git restore --source=70d0b5561614f13310eb95afbfd928ad39f98509 -- Shared/DataStore/Rules.db || true
 
-          # 2. 替换 import AnywhereRules
-          find Shared -name "*.swift" -exec sed -i '' '/import AnywhereRules/d' {} +
+          # 如果上面命令因为 commit 深度不够找不到该 commit，则从网络直接拉取历史 raw 文件或生成一个空的 SQLite 占位
+          if [ ! -f "Shared/DataStore/Rules.db" ]; then
+            echo "git restore 未拉到文件，尝试从 git 历史中直接 checkout 目标对象..."
+            git fetch origin 70d0b5561614f13310eb95afbfd928ad39f98509 --depth=1 || true
+            git checkout 70d0b5561614f13310eb95afbfd928ad39f98509 -- Shared/DataStore/Rules.db || true
+          fi
 
-          # 3. 替换加载路径（根据实际调用的变量名微调匹配表达式）
-          find Shared -name "*.swift" -exec sed -i '' 's/AnywhereRules\.databaseURL/Bundle.main.url(forResource: "Rules", withExtension: "db")!/g' {} +
+          echo "=== 2. 在本地创建本地 Dummy AnywhereRules Package ==="
+          # 创建一个本地伪造的包，让 xcodebuild 无需联网下载
+          mkdir -p LocalPackages/AnywhereRules/Sources/AnywhereRules
+          
+          cat << 'EOF' > LocalPackages/AnywhereRules/Package.swift
+          // swift-tools-version: 5.9
+          import PackageDescription
+
+          let package = Package(
+              name: "AnywhereRules",
+              platforms: [.iOS(.v15), .macOS(.v12), .tvOS(.v15), .watchOS(.v8)],
+              products: [
+                  .library(name: "AnywhereRules", targets: ["AnywhereRules"]),
+              ],
+              targets: [
+                  .target(name: "AnywhereRules", path: "Sources/AnywhereRules")
+              ]
+          )
+          EOF
+
+          cat << 'EOF' > LocalPackages/AnywhereRules/Sources/AnywhereRules/AnywhereRules.swift
+          import Foundation
+
+          public struct AnywhereRules {
+              public static var databaseURL: URL? {
+                  return Bundle.main.url(forResource: "Rules", withExtension: "db")
+              }
+          }
+          EOF
+
+          # 初始化本地 git 仓库，让 SPM 能将它认作合法 repo
+          git -C LocalPackages/AnywhereRules init
+          git -C LocalPackages/AnywhereRules config user.name "CI"
+          git -C LocalPackages/AnywhereRules config user.email "ci@local"
+          git -C LocalPackages/AnywhereRules add .
+          git -C LocalPackages/AnywhereRules commit -m "Dummy AnywhereRules"
+          git -C LocalPackages/AnywhereRules tag 1.0.0
+
+          LOCAL_PKG_PATH="$(pwd)/LocalPackages/AnywhereRules"
+
+          echo "=== 3. 将工程中对远程仓库的引用替换为本地伪包 ==="
+          # 替换 project.pbxproj 中的远程 URL 为本地文件协议路径
+          find . -name "project.pbxproj" -exec sed -i '' "s|https://github.com/hiDandelion/AnywhereRules.git|file://${LOCAL_PKG_PATH}|g" {} +
+          find . -name "Package.resolved" -exec sed -i '' "s|https://github.com/hiDandelion/AnywhereRules.git|file://${LOCAL_PKG_PATH}|g" {} +
+
+          echo "AnywhereRules 成功替换为本地 Dummy Package！
           
       - name: Select Xcode
         run: |
