@@ -57,24 +57,18 @@ jobs:
           repository: NodePassProject/Anywhere
           fetch-depth: 0
           submodules: recursive
-      - name: Workaround Restore local Rules
+      - name: Workaround Fix AnywhereRules Dependency
         run: |
           set -euo pipefail
 
-          echo "=== 1. 从历史提交中恢复 Rules.db ==="
+          echo "=== 1. 恢复 Rules.db ==="
+          git fetch origin 70d0b5561614f13310eb95afbfd928ad39f98509 --depth=1 || true
           git restore --source=70d0b5561614f13310eb95afbfd928ad39f98509 -- Shared/DataStore/Rules.db || true
 
-          # 如果上面命令因为 commit 深度不够找不到该 commit，则从网络直接拉取历史 raw 文件或生成一个空的 SQLite 占位
-          if [ ! -f "Shared/DataStore/Rules.db" ]; then
-            echo "git restore 未拉到文件，尝试从 git 历史中直接 checkout 目标对象..."
-            git fetch origin 70d0b5561614f13310eb95afbfd928ad39f98509 --depth=1 || true
-            git checkout 70d0b5561614f13310eb95afbfd928ad39f98509 -- Shared/DataStore/Rules.db || true
-          fi
-
-          echo "=== 2. 在本地创建本地 Dummy AnywhereRules Package ==="
-          # 创建一个本地伪造的包，让 xcodebuild 无需联网下载
+          echo "=== 2. 创建本地 Dummy AnywhereRules Package ==="
+          rm -rf LocalPackages/AnywhereRules
           mkdir -p LocalPackages/AnywhereRules/Sources/AnywhereRules
-          
+
           cat << 'EOF' > LocalPackages/AnywhereRules/Package.swift
           // swift-tools-version: 5.9
           import PackageDescription
@@ -101,8 +95,8 @@ jobs:
           }
           EOF
 
-          # 初始化本地 git 仓库，让 SPM 能将它认作合法 repo
-          git -C LocalPackages/AnywhereRules init
+          # 初始化为有效 Git 仓库
+          git -C LocalPackages/AnywhereRules init -b main
           git -C LocalPackages/AnywhereRules config user.name "CI"
           git -C LocalPackages/AnywhereRules config user.email "ci@local"
           git -C LocalPackages/AnywhereRules add .
@@ -111,12 +105,25 @@ jobs:
 
           LOCAL_PKG_PATH="$(pwd)/LocalPackages/AnywhereRules"
 
-          echo "=== 3. 将工程中对远程仓库的引用替换为本地伪包 ==="
-          # 替换 project.pbxproj 中的远程 URL 为本地文件协议路径
-          find . -name "project.pbxproj" -exec sed -i '' "s|https://github.com/hiDandelion/AnywhereRules.git|file://${LOCAL_PKG_PATH}|g" {} +
-          find . -name "Package.resolved" -exec sed -i '' "s|https://github.com/hiDandelion/AnywhereRules.git|file://${LOCAL_PKG_PATH}|g" {} +
+          echo "=== 3. 替换工程文件中的远程 URL ==="
+          python3 -c "
+          import os, glob
 
-          echo "AnywhereRules 成功替换为本地 Dummy Package！
+          target_url = 'https://github.com/hiDandelion/AnywhereRules.git'
+          local_url = 'file://${LOCAL_PKG_PATH}'
+
+          for ext in ['**/*.pbxproj', '**/Package.resolved']:
+              for path in glob.glob(ext, recursive=True):
+                  with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+                      content = f.read()
+                  if target_url in content:
+                      print(f'Replacing in {path}')
+                      new_content = content.replace(target_url, local_url)
+                      with open(path, 'w', encoding='utf-8') as f:
+                          f.write(new_content)
+          "
+
+          echo "AnywhereRules 成功替换为本地 Dummy Package！"
           
       - name: Select Xcode
         run: |
