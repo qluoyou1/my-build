@@ -61,7 +61,7 @@ jobs:
           xcodebuild -version
           xcodebuild -showsdks
 
-      - name: Workaround 1: Restore Rules.db and Remove 404 AnywhereRules Dependency
+      - name: Workaround 1 Restore Rules.db and Remove 404 AnywhereRules Dependency
         run: |
           set -euo pipefail
           echo "=== 1. 从 commit 70d0b556 恢复 Rules.db ==="
