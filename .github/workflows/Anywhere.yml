@@ -125,7 +125,7 @@ jobs:
                       print(f'Error reading {res}: {e}')
           "
 
-      - name: Workaround 2: Fix Watch App Missing Color (Issue #100)
+      - name: Workaround 2  Fix Watch App Missing Color (Issue #100)
         if: matrix.platform == 'watchOS'
         run: |
           set -euo pipefail
@@ -145,7 +145,7 @@ jobs:
           EOF
           echo "已在 $WATCH_DIR 注入 Color 补丁。"
 
-      - name: Workaround 3: Force Manual Signing in Project
+      - name: Workaround 3  Force Manual Signing in Project
         run: |
           set -euo pipefail
           echo "=== 强制关闭 Automatic Signing 校验，防止因缺 Profile 报错 ==="
