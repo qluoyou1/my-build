@@ -35,12 +35,12 @@ jobs:
       matrix:
         include:
           - platform: iOS
-            scheme_keyword: "ios"
+            scheme: meow-ios
             destination: "generic/platform=iOS"
             rust_target: "aarch64-apple-ios"
             artifact: meow-iOS
           - platform: tvOS
-            scheme_keyword: "tvos"
+            scheme: meow-tvos
             destination: "generic/platform=tvOS"
             rust_target: "aarch64-apple-tvos"
             artifact: meow-tvOS
@@ -92,47 +92,7 @@ jobs:
         run: |
           # test $(stat -f %z MeowCore/Frameworks/MeowCore.xcframework/ios-arm64/libmeow_ios_ffi.a) -lt 8388608
           echo "Size gate placeholder — stripped-binary enforcement lives in the archive job (PacketTunnel.appex); raw-.a gate lands with T1.4."
-      - uses: actions/upload-artifact@v4
-        with:
-          name: MeowCore.xcframework
-          path: MeowCore/Frameworks/MeowCore.xcframework
-          if-no-files-found: error
-
-      - name: Detect Workspace / Project & Scheme
-        id: proj
-        run: |
-          set -euo pipefail
-          echo "=== 检测工程与 Scheme 列表 ==="
-          
-          if [ -f "$(find . -maxdepth 2 -name '*.xcworkspace' | head -1)" ]; then
-            PROJ_FLAG="-workspace $(find . -maxdepth 2 -name '*.xcworkspace' | head -1)"
-          else
-            PROJ_FILE=$(find . -maxdepth 2 -name "*.xcodeproj" | head -1)
-            PROJ_FLAG="-project $PROJ_FILE"
-          fi
-          echo "proj_flag=$PROJ_FLAG" >> "$GITHUB_OUTPUT"
-
-          SCHEME=$(xcodebuild$PROJ_FLAG -list -json | python3 -c "
-          import sys, json
-          target_platform = '${{ matrix.scheme_keyword }}'.lower()
-          try:
-              data = json.load(sys.stdin)
-              schemes = data.get('workspace', {}).get('schemes', []) or data.get('project', {}).get('schemes', [])
-              filtered = [s for s in schemes if 'test' not in s.lower() and 'extension' not in s.lower()]
-              
-              matched = [s for s in filtered if target_platform in s.lower()]
-              if matched:
-                  print(matched[0])
-              elif filtered:
-                  print(filtered[0])
-              else:
-                  print('meow')
-          except Exception:
-              print('meow')
-          ")
-          echo "Selected Scheme: $SCHEME"
-          echo "scheme=$SCHEME" >> "$GITHUB_OUTPUT"
-
+ 
       - name: Disable Code Signing in Project
         run: |
           set -euo pipefail
@@ -163,13 +123,9 @@ jobs:
           mkdir -p "$ARCHIVE_DIR"
           ARCHIVE_PATH="$ARCHIVE_DIR/${{ matrix.artifact }}.xcarchive"
 
-          SCHEME="${{ steps.proj.outputs.scheme }}"
-          PROJ_FLAG="${{ steps.proj.outputs.proj_flag }}"
-
-          echo "Archiving ${{ matrix.platform }} with scheme:$SCHEME..."
+          echo "Archiving ${{ matrix.platform }} with scheme:${{ matrix.scheme }}..."
           xcodebuild \
-            $PROJ_FLAG \
-            -scheme "$SCHEME" \
+            -scheme "${{ matrix.scheme }}" \
             -configuration Release \
             -destination "${{ matrix.destination }}" \
             archive \
