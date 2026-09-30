@@ -162,7 +162,34 @@ jobs:
           fi
 
           xcodebuild -list || true
+      - name: Disable Code Signing in Project
+        run: |
+          set -euo pipefail
+          echo "=== 强制将所有 Target 改为手动无签名模式 ==="
+          python3 -c "
+          import re, glob
 
+          for pbx in glob.glob('**/*.pbxproj', recursive=True):
+              with open(pbx, 'r', encoding='utf-8') as f:
+                  content = f.read()
+
+              # 1. 禁用自动签名 (CODE_SIGN_STYLE = Manual)
+              content = re.sub(r'CODE_SIGN_STYLE\s*=\s*Automatic;', 'CODE_SIGN_STYLE = Manual;', content)
+
+              # 2. 清空签名标识符与 Provisioning Profile 绑定
+              content = re.sub(r'PROVISIONING_PROFILE_SPECIFIER\s*=\s*[^;]+;', 'PROVISIONING_PROFILE_SPECIFIER = \"\";', content)
+              content = re.sub(r'\"?PROVISIONING_PROFILE\"?\s*=\s*[^;]+;', 'PROVISIONING_PROFILE = \"\";', content)
+              content = re.sub(r'CODE_SIGN_IDENTITY\s*=\s*[^;]+;', 'CODE_SIGN_IDENTITY = \"\";', content)
+              content = re.sub(r'DEVELOPMENT_TEAM\s*=\s*[^;]+;', 'DEVELOPMENT_TEAM = \"\";', content)
+
+              # 3. 强制关闭代码签名注入
+              content = re.sub(r'(buildSettings\s*=\s*\{)', r'\1\n\t\t\t\tCODE_SIGNING_ALLOWED = NO;\n\t\t\t\tCODE_SIGNING_REQUIRED = NO;', content)
+
+              with open(pbx, 'w', encoding='utf-8') as f:
+                  f.write(content)
+              print(f'Stripped signing configuration from {pbx}')
+          "
+          
       - name: Build and Archive ${{ matrix.platform }}
         id: archive
         run: |
@@ -179,8 +206,9 @@ jobs:
             archive \
             -archivePath "$ARCHIVE_PATH" \
             # SKIP_INSTALL=NO \
-            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGN_STYLE=Manual \
             CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_ENTITLEMENTS="" \
             PROVISIONING_PROFILE_SPECIFIER=""
