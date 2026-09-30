@@ -35,17 +35,17 @@ jobs:
       matrix:
         include:
           - platform: iOS
-            scheme: Anywhere
+            scheme: "Anywhere"
             destination: "generic/platform=iOS"
             artifact: Anywhere-iOS
             type: ipa
           - platform: tvOS
-            scheme: Anywhere tvOS
+            scheme: "Anywhere TV"
             destination: "generic/platform=tvOS"
             artifact: Anywhere-tvOS
             type: ipa
           - platform: watchOS
-            scheme: Anywhere Watch App
+            scheme: "Anywhere Watch App"
             destination: "generic/platform=watchOS"
             artifact: Anywhere-watchOS
             type: ipa
